@@ -1,6 +1,7 @@
 `include "memory.sv"
 `include "ws2812b.sv"
 `include "controller.sv"
+`include "life.sv"
 
 // led_matrix top level module
 
@@ -11,14 +12,23 @@ module top(
     output logic    _48b, 
     output logic    _45a
 );
+    logic done;
+    logic [1:0] color_sel= 2'd0;
+    logic [511:0] data_in_mux, data_out_mux;
 
-    logic [7:0] red_data;
-    logic [7:0] green_data;
-    logic [7:0] blue_data;
+    logic [511:0] red_init;
+    logic [511:0] green_init;
+    logic [511:0] blue_init;
+
+    logic [511:0] red_old = 512'd0;
+    logic [511:0] green_old = 512'd0;
+    logic [511:0] blue_old = 512'd0;
+
+    logic [511:0] red_new;
+    logic [511:0] green_new;
+    logic [511:0] blue_new;
 
     logic [5:0] pixel;
-    logic [4:0] frame;
-    logic [10:0] address;
 
     logic [23:0] shift_reg = 24'd0;
     logic load_sreg;
@@ -26,33 +36,26 @@ module top(
     logic shift;
     logic ws2812b_out;
 
-    assign address = { frame, pixel };
 
     // Instance sample memory for red channel
     memory #(
         .INIT_FILE      ("spiral/red.txt")
     ) u1 (
-        .clk            (clk), 
-        .read_address   (address), 
-        .read_data      (red_data)
+        .read_data      (red_init)
     );
 
     // Instance sample memory for green channel
     memory #(
         .INIT_FILE      ("spiral/green.txt")
     ) u2 (
-        .clk            (clk), 
-        .read_address   (address), 
-        .read_data      (green_data)
+        .read_data      (green_init)
     );
 
     // Instance sample memory for blue channel
     memory #(
         .INIT_FILE      ("spiral/blue.txt")
     ) u3 (
-        .clk            (clk), 
-        .read_address   (address), 
-        .read_data      (blue_data)
+        .read_data      (blue_init)
     );
 
     // Instance the WS2812B output driver
@@ -69,21 +72,54 @@ module top(
         .clk            (clk), 
         .load_sreg      (load_sreg), 
         .transmit_pixel (transmit_pixel), 
-        .pixel          (pixel), 
-        .frame          (frame)
+        .pixel          (pixel)
     );
+
+    life life_engine (
+        .data_in(data_in_mux),
+        .data_out(data_out_mux),
+    );
+    
+    always_comb begin
+        case (color_sel)
+            2'd0: data_in_mux = red_old;
+            2'd1: data_in_mux = green_old;
+            2'd2: data_in_mux = blue_old;
+            default: data_in_mux = 512'd0;
+        endcase
+    end
+
+logic initialized = 0;
+
+always_ff @(posedge clk) begin
+    if (!initialized) begin
+        red_old   <= red_init;
+        green_old <= green_init;
+        blue_old  <= blue_init;
+        initialized <= 1;
+    end else if (load_sreg && pixel == 0) begin
+
+        case (color_sel)
+            2'd0: red_old   <= data_out_mux;
+            2'd1: green_old <= data_out_mux;
+            2'd2: blue_old  <= data_out_mux;
+        endcase
+
+        color_sel <= (color_sel == 2'd2) ? 2'd0 : (color_sel + 2'd1);
+    end
+end
 
     always_ff @(posedge clk) begin
         if (load_sreg) begin
             unique case ({ SW, BOOT })
                 2'b00:
-                    shift_reg <= { green_data, 16'd0 };
+                    shift_reg <= { green_old[pixel*8 +: 8], 16'd0 };
                 2'b01:
-                    shift_reg <= { 8'd0, red_data, 8'd0 };
+                    shift_reg <= { 8'd0, red_old[pixel*8 +: 8], 8'd0 };
                 2'b10:
-                    shift_reg <= { 16'd0, blue_data };
+                    shift_reg <= { 16'd0, blue_old[pixel*8 +: 8] };
                 2'b11:
-                    shift_reg <= { green_data, red_data, blue_data };
+                    shift_reg <= { green_old[pixel*8 +: 8], red_old[pixel*8 +: 8], blue_old[pixel*8 +: 8] };
             endcase
         end
         else if (shift) begin
